@@ -706,14 +706,14 @@
         // You now have `emaFast` and `emaSlow` values from the sliders.
         // Apply your trade logic here based on what your Supabase actually logs.
         // Example: If your bot logs `fast_ema_val` and `slow_ema_val` in the DB:
-        /*
-        if (isTaken && log.fast_ema_val && log.slow_ema_val) {
+        
+        if (isTaken && log.ema_fast_period && log.ema_slow_period) {
             // Example custom logic: Only take trades where trend aligns
-            if (log.predicted_side === "UP" && log.fast_ema_val <= log.slow_ema_val) {
+            if (log.predicted_side === "UP" && log.ema_fast_period <= log.ema_slow_period) {
                 isTaken = false; 
             }
         }
-        */
+        
 
         let pnl = 0;
         if (isTaken) {
