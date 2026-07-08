@@ -632,40 +632,64 @@
         });
 
         async function fetchBacktestLogs() {
-            const startE = parseInt(document.getElementById('bt-start').value);
-            const endE = parseInt(document.getElementById('bt-end').value);
-            const btn = document.getElementById('bt-fetch');
+        async function fetchBacktestLogs() {
+    const startE = parseInt(document.getElementById('bt-start').value);
+    const endE = parseInt(document.getElementById('bt-end').value);
+    const btn = document.getElementById('bt-fetch');
 
-            if (!startE || !endE || startE > endE) {
-                alert("Please enter valid start and end epochs.");
-                return;
-            }
+    if (!startE || !endE || startE > endE) {
+        alert("Please enter valid start and end epochs.");
+        return;
+    }
 
-            btn.innerText = "Fetching...";
-            btn.style.opacity = "0.7";
+    btn.innerText = "Fetching...";
+    btn.style.opacity = "0.7";
 
-            try {
-                const { data, error } = await supabaseClient
-                    .from('prediction_logs')
-                    .select('*')
-                    .gte('epoch_id', startE)
-                    .lte('epoch_id', endE)
-                    .order('epoch_id', { ascending: true });
+    try {
+        let allFetchedData = [];
+        let startIndex = 0;
+        const pageSize = 1000;
+        let keepFetching = true;
 
-                if (error) throw error;
+        // Automatically paginate through Supabase data in chunks of 1000
+        while (keepFetching) {
+            const { data, error } = await supabaseClient
+                .from('prediction_logs')
+                .select('*')
+                .gte('epoch_id', startE)
+                .lte('epoch_id', endE)
+                .order('epoch_id', { ascending: true })
+                .range(startIndex, startIndex + pageSize - 1); // <-- Grabs chunks
+
+            if (error) throw error;
+
+            if (data && data.length > 0) {
+                allFetchedData = allFetchedData.concat(data); // Append new chunk
+                startIndex += pageSize; // Move to the next page
                 
-                rawBtData = data;
-                updateBacktestStats();
-                document.getElementById('bt-ai-text').innerHTML = `<i style="color: var(--subtext);">Data loaded! Adjust thresholds or click Analyze.</i>`;
-                
-            } catch (err) {
-                console.error("Backtest Fetch Error:", err);
-                alert("Failed to fetch logs: " + err.message);
-            } finally {
-                btn.innerText = "Fetch Logs";
-                btn.style.opacity = "1";
+                // If the data returned is less than 1000, we've hit the end
+                if (data.length < pageSize) {
+                    keepFetching = false;
+                }
+            } else {
+                keepFetching = false;
             }
         }
+        
+        rawBtData = allFetchedData; // Assign the massive array to the backtester
+        
+        updateBacktestStats();
+        document.getElementById('bt-ai-text').innerHTML = `<i style="color: var(--subtext);">Data loaded! Total epochs pulled: <b>${rawBtData.length}</b>. Adjust thresholds or click Analyze.</i>`;
+        
+    } catch (err) {
+        console.error("Backtest Fetch Error:", err);
+        alert("Failed to fetch logs: " + err.message);
+    } finally {
+        btn.innerText = "Fetch Logs";
+        btn.style.opacity = "1";
+    }
+}
+
 
         function updateBacktestStats() {
             if (!rawBtData || rawBtData.length === 0) return;
