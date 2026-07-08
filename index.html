@@ -631,51 +631,32 @@
             });
         });
 
-        async function fetchBacktestLogs() {
-            const startE = parseInt(document.getElementById('bt-start').value);
-            const endE = parseInt(document.getElementById('bt-end').value);
-            const btn = document.getElementById('bt-fetch');
+        // 1. FIX: The Fetch Function
+// This ensures we only ask Supabase for columns that actually exist, preventing the crash.
+async function fetchBacktestData() {
+    try {
+        const { data, error } = await supabase
+            .from('prediction_logs')
+            .select('*') // Grabs everything available without demanding missing columns
+            .order('epoch_id', { ascending: false })
+            .limit(1000);
 
-            if (!startE || !endE || startE > endE) {
-                alert("Please enter valid start and end epochs.");
-                return;
-            }
+        if (error) throw error;
+        rawBtData = data;
+        updateBacktestStats();
+    } catch (err) {
+        console.error("Fetch Error:", err);
+        alert("Failed to fetch logs: " + err.message);
+    }
+}
 
-            btn.innerText = "Fetching...";
-            btn.style.opacity = "0.7";
-
-            try {
-                const { data, error } = await supabaseClient
-                    .from('prediction_logs')
-                    .select('*')
-                    .gte('epoch_id', startE)
-                    .lte('epoch_id', endE)
-                    .order('epoch_id', { ascending: true });
-
-                if (error) throw error;
-                
-                rawBtData = data;
-                updateBacktestStats();
-                document.getElementById('bt-ai-text').innerHTML = `<i style="color: var(--subtext);">Data loaded! Adjust thresholds or click Analyze.</i>`;
-                
-            } catch (err) {
-                console.error("Backtest Fetch Error:", err);
-                alert("Failed to fetch logs. See console.");
-            } finally {
-                btn.innerText = "Fetch Logs";
-                btn.style.opacity = "1";
-            }
-        }
-
-        function updateBacktestStats() {
+// 2. FIX: The Backtest Math & Text Parsing
+function updateBacktestStats() {
     if (!rawBtData || rawBtData.length === 0) return;
 
-    // 1. Grab ALL slider values (Added the missing EMA variables here)
     const baseConf = parseFloat(btSliders.base.el.value);
     const highConf = parseFloat(btSliders.high.el.value);
     const atrThresh = parseFloat(btSliders.atr.el.value);
-    const emaFast = parseInt(btSliders.emaFast.el.value);
-    const emaSlow = parseInt(btSliders.emaSlow.el.value);
     
     const FLAT_BET = 1.0;
 
@@ -685,7 +666,7 @@
     processedBtData = [];
 
     rawBtData.forEach(log => {
-        // Parse confidence 
+        // Parse Confidence
         let c = 0;
         if (typeof log.confidence === 'number') c = log.confidence;
         else if (log.confidence) {
@@ -694,32 +675,47 @@
         }
 
         const e = log.epoch_id;
-        const a = log.atr || log.atr_value || log.atr_num || 0.15; 
         const win = log.result && (log.result.includes('WIN')); 
-        const p = log.payout_multiplier || log.p || 1.55; 
+        const p = log.payout_multiplier ? parseFloat(log.payout_multiplier) : 1.55; 
 
-        // 2. Base Confidence & ATR Logic
+        // --- REGEX BRAIN TEXT EXTRACTION ---
+        let a = 0.15; // Fallback ATR
+        let emaAligned = true; // Fallback EMA alignment
+        
+        if (log.thought_process) {
+            // Extract the exact ATR percentage from strings like "Normal Volatility (0.13%)"
+            const atrMatch = log.thought_process.match(/Volatility \(([\d.]+)%\)/);
+            if (atrMatch) a = parseFloat(atrMatch[1]);
+
+            // Determine if the trend alignment supported the trade direction
+            const isBullishEMA = log.thought_process.includes("leads Slow EMA");
+            const isBearishEMA = log.thought_process.includes("trails Slow EMA");
+            
+            let predictedSide = log.predicted_side;
+            if (predictedSide === "SKIP" && log.confidence) {
+                if (log.confidence.includes("Try: UP")) predictedSide = "UP";
+                if (log.confidence.includes("Try: DOWN")) predictedSide = "DOWN";
+            }
+
+            if (predictedSide === "UP" && isBearishEMA) emaAligned = false;
+            if (predictedSide === "DOWN" && isBullishEMA) emaAligned = false;
+        }
+
+        // Base Confidence & ATR Slider Logic
         const requiredConfidence = a > atrThresh ? baseConf : highConf;
         let isTaken = c >= requiredConfidence;
 
-        // 3. THE MISSING EMA LOGIC
-        // You now have `emaFast` and `emaSlow` values from the sliders.
-        // Apply your trade logic here based on what your Supabase actually logs.
-        // Example: If your bot logs `fast_ema_val` and `slow_ema_val` in the DB:
-        
-        if (isTaken && log.ema_fast_period && log.ema_slow_period) {
-            // Example custom logic: Only take trades where trend aligns
-            if (log.predicted_side === "UP" && log.ema_fast_period <= log.ema_slow_period) {
-                isTaken = false; 
-            }
+        // Apply EMA Text Filter: Only take trades where the text confirms EMA aligned with prediction
+        if (isTaken && !emaAligned) {
+            isTaken = false; 
         }
-        
 
+        // PnL & Stat Tallying
         let pnl = 0;
         if (isTaken) {
             if (win) {
                 takenWins++;
-                pnl = (p * FLAT_BET) - FLAT_BET; // Leaving PnL as is per your request
+                pnl = (p * FLAT_BET) - FLAT_BET;
             } else {
                 takenLosses++;
                 pnl = -FLAT_BET;
@@ -746,36 +742,34 @@
     
     const avgReturn = totalTaken > 0 ? (totalPnL / totalTaken).toFixed(3) : 0;
 
-    btStats = {
-        totalPredictions: rawBtData.length,
-        takenWins, takenLosses, totalTaken,
-        winRate: strictWinRate, totalPnL, avgReturn,
-        skippedWins, skippedLosses, totalSkipped
-    };
+    // SAFE UI UPDATES
+    try {
+        document.getElementById('bt-stat-winrate').innerText = `${strictWinRate}%`;
+        document.getElementById('bt-stat-winrate').className = `bt-val-small ${strictWinRate >= 55 ? 'green' : (strictWinRate > 0 ? 'red' : '')}`;
+        document.getElementById('bt-stat-wins-losses').innerText = `${takenWins} W | ${takenLosses} L`;
+        
+        document.getElementById('bt-stat-total-winrate').innerText = `${totalWinRate}%`;
+        document.getElementById('bt-stat-total-winrate').className = `bt-val-small ${totalWinRate >= 55 ? 'green' : (totalWinRate > 0 ? 'red' : '')}`;
+        document.getElementById('bt-stat-total-wins-losses').innerText = `${totalWins} W | ${totalLosses} L`;
+        
+        const pnlEl = document.getElementById('bt-stat-pnl');
+        if (pnlEl) {
+            pnlEl.innerText = `${totalPnL > 0 ? '+' : ''}${totalPnL.toFixed(2)}`;
+            pnlEl.className = `bt-val ${totalPnL >= 0 ? 'blue' : 'red'}`;
+        }
+        
+        if (document.getElementById('bt-stat-avg')) document.getElementById('bt-stat-avg').innerText = avgReturn;
+        if (document.getElementById('bt-stat-taken')) document.getElementById('bt-stat-taken').innerHTML = `${totalTaken} <span style="font-size: 1rem; color: var(--subtext); font-weight: normal;">/ ${rawBtData.length}</span>`;
+        
+        if (document.getElementById('bt-stat-skipped')) document.getElementById('bt-stat-skipped').innerText = totalSkipped;
+        if (document.getElementById('bt-stat-missed-wins')) document.getElementById('bt-stat-missed-wins').innerText = skippedWins;
+        if (document.getElementById('bt-stat-dodged-losses')) document.getElementById('bt-stat-dodged-losses').innerText = skippedLosses;
 
-    // Update UI 
-    document.getElementById('bt-stat-winrate').innerText = `${strictWinRate}%`;
-    document.getElementById('bt-stat-winrate').className = `bt-val-small ${strictWinRate >= 55 ? 'green' : (strictWinRate > 0 ? 'red' : '')}`;
-    document.getElementById('bt-stat-wins-losses').innerText = `${takenWins} W | ${takenLosses} L`;
-    
-    document.getElementById('bt-stat-total-winrate').innerText = `${totalWinRate}%`;
-    document.getElementById('bt-stat-total-winrate').className = `bt-val-small ${totalWinRate >= 55 ? 'green' : (totalWinRate > 0 ? 'red' : '')}`;
-    document.getElementById('bt-stat-total-wins-losses').innerText = `${totalWins} W | ${totalLosses} L`;
-    
-    const pnlEl = document.getElementById('bt-stat-pnl');
-    pnlEl.innerText = `${totalPnL > 0 ? '+' : ''}${totalPnL.toFixed(2)}`;
-    pnlEl.className = `bt-val ${totalPnL >= 0 ? 'blue' : 'red'}`;
-    
-    document.getElementById('bt-stat-avg').innerText = avgReturn;
-    document.getElementById('bt-stat-taken').innerHTML = `${totalTaken} <span style="font-size: 1rem; color: var(--subtext); font-weight: normal;">/ ${rawBtData.length}</span>`;
-    
-    document.getElementById('bt-stat-skipped').innerText = totalSkipped;
-    document.getElementById('bt-stat-missed-wins').innerText = skippedWins;
-    document.getElementById('bt-stat-dodged-losses').innerText = skippedLosses;
-
-    drawScatterPlot(baseConf, highConf);
+        if (typeof drawScatterPlot === "function") drawScatterPlot(baseConf, highConf);
+    } catch (e) {
+        console.warn("UI update skipped a non-existent element:", e);
+    }
 }
-
 
         async function handleAnalyzeStrategy() {
             if (!btStats) {
